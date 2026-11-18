@@ -1,6 +1,7 @@
 import {
   selectUpstreamCandidates,
-  getBaseUrl,
+  getBaseUrlForUpstream,
+  getUpstreamTarget,
   getApiKeyForUpstream,
   getActiveUpstreamKeyEntries,
   getActiveUpstreamKeys,
@@ -560,7 +561,7 @@ let isCodex =
 
 let upstreamUrl = isCodex
   ? (upstream.baseUrl?.trim() || CODEX_CONFIG.BASE_URL)
-  : `${getBaseUrl(upstream)}/chat/completions`;
+  : `${getBaseUrlForUpstream(upstream)}/chat/completions`;
 
   const timeoutSeconds = Number(opt.requestTimeoutSeconds) || 0;
   const controller = new AbortController();
@@ -735,14 +736,12 @@ providerLoop: for (const candidate of upstreamCandidates) {
   isCodex =
     candidate.baseUrl?.includes("chatgpt.com/backend-api/codex") ||
     candidate.name.toLowerCase().includes("codex");
+  const target = getUpstreamTarget(candidate);
   upstreamUrl = isCodex
     ? (candidate.baseUrl?.trim() || CODEX_CONFIG.BASE_URL)
-    : `${getBaseUrl(candidate)}/chat/completions`;
+    : `${target.baseUrl}/chat/completions`;
 
-  const keyCandidates = buildFailoverKeyCandidates(
-    getApiKeyForUpstream(candidate),
-    getActiveUpstreamKeyEntries(candidate)
-  );
+  const keyCandidates = buildFailoverKeyCandidates(target.apiKey, target.keyEntries);
 
   for (let attempt = 0; attempt < keyCandidates.length; attempt++) {
     try {
@@ -1511,7 +1510,8 @@ if (opt.cacheEnabled && !options?.skipCache) {
     }
   }
 
-  let upstreamUrl = `${getBaseUrl(upstream)}/v1/messages`;
+  // Assigned per candidate inside the provider loop below.
+  let upstreamUrl = "";
 
 const buildAnthropicHeaders = (apiKey: string): Record<string, string> => {
   const headerMap: Record<string, string> = {
@@ -1561,12 +1561,10 @@ let lastErrorResponse: Response | null = null;
 providerLoop: for (const candidate of upstreamCandidates) {
   upstream = candidate;
   finishActive.setUpstream(candidate.id);
-  upstreamUrl = `${getBaseUrl(candidate)}/v1/messages`;
+  const target = getUpstreamTarget(candidate);
+  upstreamUrl = `${target.baseUrl}/v1/messages`;
 
-  const keyCandidates = buildFailoverKeyCandidates(
-    getApiKeyForUpstream(candidate),
-    getActiveUpstreamKeyEntries(candidate)
-  );
+  const keyCandidates = buildFailoverKeyCandidates(target.apiKey, target.keyEntries);
 
   for (let attempt = 0; attempt < keyCandidates.length; attempt++) {
     try {

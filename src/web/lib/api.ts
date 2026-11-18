@@ -103,12 +103,20 @@ export interface UpstreamKeyEntryItem {
   expiresAt?: number;
 }
 
+export interface UpstreamApiGroupItem {
+  id: string;
+  baseUrl: string;
+  keyEntries: UpstreamKeyEntryItem[];
+}
+
 export interface UpstreamKeyItem {
   id: string;
   provider: "openai" | "anthropic";
   name: string;
   prefix?: string | null;
   baseUrl: string | null;
+  baseUrls?: string[];
+  apiGroups?: UpstreamApiGroupItem[];
   isActive: number;
   roundRobin?: boolean;
   weight: number;

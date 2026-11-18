@@ -4,8 +4,9 @@ import { upstreamKeys } from "../db/schema";
 import { authMiddleware } from "../middleware/auth";
 import { eq, desc } from "drizzle-orm";
 import {
-  getBaseUrl,
-  getApiKeyForUpstream,
+  getUpstreamTarget,
+  parseUpstreamBaseUrls,
+  parseApiGroups,
   parseUpstreamKeys,
   parseUpstreamKeyEntries,
   parseUpstreamModels,
@@ -118,6 +119,98 @@ export function parseRawKeysInput(
   }
 
   return results;
+}
+
+// Normalizes the base URL pool. The first URL is also stored as the legacy
+// `base_url` so all existing endpoints (display, model sync, dedupe) keep working.
+export function normalizeBaseUrls(
+  baseUrls?: unknown,
+  baseUrl?: unknown
+): { primary: string | null; all: string[] } {
+  const cleaned: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value !== "string") return;
+    for (const part of value.split(/[\n,]+/)) {
+      const url = part.trim().replace(/\/+$/, "");
+      if (url.length > 0 && !cleaned.includes(url)) cleaned.push(url);
+    }
+  };
+
+  if (Array.isArray(baseUrls)) {
+    baseUrls.forEach(push);
+  } else if (typeof baseUrls === "string") {
+    push(baseUrls);
+  }
+  push(baseUrl);
+
+  return { primary: cleaned[0] || null, all: cleaned };
+}
+
+// Multi API mode: an upstream holds N groups, each with one Base URL and its
+// own API key pool. Legacy fields are still filled from the first group.
+export function normalizeApiGroups(
+  rawGroups: unknown,
+  fallback?: { baseUrl?: string | null; keyEntries?: UpstreamKeyEntry[] }
+): Array<{ id: string; baseUrl: string; keyEntries: UpstreamKeyEntry[] }> {
+  let parsedSource: unknown = rawGroups;
+  if (typeof parsedSource === "string") {
+    try {
+      parsedSource = JSON.parse(parsedSource);
+    } catch (e) {
+      parsedSource = [];
+    }
+  }
+  const source: any[] = Array.isArray(parsedSource) ? parsedSource : [];
+
+  const now = Date.now();
+  const groups: Array<{ id: string; baseUrl: string; keyEntries: UpstreamKeyEntry[] }> = [];
+
+  source.forEach((raw: any, gi: number) => {
+    if (!raw || typeof raw !== "object") return;
+    const baseUrl =
+      typeof raw.baseUrl === "string" ? raw.baseUrl.trim().replace(/\/+$/, "") : "";
+    const rawKeys = Array.isArray(raw.keyEntries) ? raw.keyEntries : [];
+    const keyEntries: UpstreamKeyEntry[] = [];
+
+    rawKeys.forEach((entry: any, ki: number) => {
+      const key =
+        typeof entry === "string"
+          ? entry.trim()
+          : typeof entry?.key === "string"
+            ? entry.key.trim()
+            : "";
+      if (!key) return;
+      keyEntries.push({
+        id: typeof entry === "object" && entry?.id ? entry.id : `group_${gi + 1}_key_${ki + 1}`,
+        name:
+          typeof entry === "object" && typeof entry?.name === "string" && entry.name.trim()
+            ? entry.name.trim()
+            : `API Key #${ki + 1}`,
+        key,
+        isActive: typeof entry === "object" ? entry.isActive !== false : true,
+        createdAt: typeof entry === "object" ? entry.createdAt : now,
+        refreshToken: typeof entry === "object" && typeof entry.refreshToken === "string" ? entry.refreshToken : undefined,
+        expiresAt: typeof entry === "object" && typeof entry.expiresAt === "number" ? entry.expiresAt : undefined,
+      });
+    });
+
+    if (!baseUrl && keyEntries.length === 0) return;
+    groups.push({
+      id: typeof raw.id === "string" && raw.id ? raw.id : `group_${now}_${gi + 1}`,
+      baseUrl,
+      keyEntries,
+    });
+  });
+
+  if (groups.length === 0 && fallback) {
+    const baseUrl = fallback.baseUrl?.trim().replace(/\/+$/, "") || "";
+    const keyEntries = fallback.keyEntries || [];
+    if (baseUrl || keyEntries.length > 0) {
+      groups.push({ id: `group_${now}_1`, baseUrl, keyEntries });
+    }
+  }
+
+  return groups;
 }
 
 async function testSingleKey(
@@ -515,6 +608,8 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           name: item.name,
           prefix: item.prefix || null,
           baseUrl: item.baseUrl || null,
+          baseUrls: parseUpstreamBaseUrls((item as any).baseUrls, item.baseUrl),
+          apiGroups: parseApiGroups((item as any).apiGroups),
           isActive: item.isActive,
           roundRobin: (item as any).roundRobin !== 0,
           weight: item.weight,
@@ -567,6 +662,8 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         name: item.name,
         prefix: item.prefix || null,
         baseUrl: item.baseUrl || null,
+        baseUrls: parseUpstreamBaseUrls((item as any).baseUrls, item.baseUrl),
+        apiGroups: parseApiGroups((item as any).apiGroups),
         isActive: item.isActive,
         roundRobin: (item as any).roundRobin !== 0,
         weight: item.weight,
@@ -585,7 +682,9 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
   .post(
     "/",
     async ({ body, set }) => {
-      const { provider, name, prefix, apiKey, apiKeys, keyEntries, rawKeys, baseUrl, weight, roundRobin, models } = body;
+      const { provider, name, prefix, apiKey, apiKeys, keyEntries, rawKeys, baseUrl, baseUrls, apiGroups, weight, roundRobin, models } = body;
+      const normalizedBaseUrls = normalizeBaseUrls(baseUrls, baseUrl);
+      const normalizedApiGroups = normalizeApiGroups(apiGroups);
 
       // Extract and normalize keys list
       let normalizedEntries: UpstreamKeyEntry[] = [];
@@ -636,7 +735,19 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
       }
 
       const isFollowUp = Boolean((body as any).followUpstream);
-      if (normalizedEntries.length === 0) {
+      // In Multi API mode each group carries its own keys/base URL; flatten them
+      // into the legacy fields so existing UI/telemetry still sees every key.
+      const effectiveEntries =
+        normalizedApiGroups.length > 0
+          ? normalizedApiGroups.flatMap((g) => g.keyEntries)
+          : normalizedEntries;
+      const effectiveBaseUrls =
+        normalizedApiGroups.length > 0
+          ? normalizedApiGroups.map((g) => g.baseUrl).filter(Boolean)
+          : normalizedBaseUrls.all;
+      const effectiveBaseUrl = effectiveBaseUrls[0] || normalizedBaseUrls.primary;
+
+      if (effectiveEntries.length === 0) {
         if (isFollowUp) {
           normalizedEntries = [];
         } else {
@@ -650,11 +761,12 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           ? (body as any).id.trim()
           : "up_" + crypto.randomUUID().replace(/-/g, "");
       const now = Date.now();
-      const firstActive = normalizedEntries.find((k) => k.isActive);
+      const firstActive = effectiveEntries.find((k) => k.isActive);
+      const primaryKey = isFollowUp ? "" : (firstActive ? firstActive.key : (effectiveEntries[0]?.key || ""));
 
       let initialModels = models;
       if ((!initialModels || !Array.isArray(initialModels) || initialModels.length === 0) && !isFollowUp) {
-        if (baseUrl?.includes("bandelbanget.xyz") || name?.toLowerCase().includes("bandelbanget") || id === "up_bandelbanget_input") {
+        if (effectiveBaseUrl?.includes("bandelbanget.xyz") || name?.toLowerCase().includes("bandelbanget") || id === "up_bandelbanget_input") {
           try {
             initialModels = await fetchBandelBangetLiveModels();
           } catch (e) {
@@ -669,10 +781,12 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           provider,
           name: name?.trim() || generateRandomAlias(),
           prefix: prefix ? prefix.trim() : null,
-          apiKey: isFollowUp ? "" : (firstActive ? firstActive.key : (normalizedEntries[0]?.key || "")),
-          apiKeys: JSON.stringify(normalizedEntries),
+          apiKey: primaryKey,
+          apiKeys: JSON.stringify(effectiveEntries),
           models: initialModels ? JSON.stringify(initialModels) : JSON.stringify([]),
-          baseUrl: baseUrl?.trim() || null,
+          baseUrl: effectiveBaseUrl,
+          baseUrls: effectiveBaseUrls.length > 0 ? JSON.stringify(effectiveBaseUrls) : null,
+          apiGroups: normalizedApiGroups.length > 0 ? JSON.stringify(normalizedApiGroups) : null,
           isActive: 1,
           roundRobin: isFollowUp ? 0 : (roundRobin !== false ? 1 : 0),
           weight: weight ?? 1,
@@ -689,10 +803,12 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           provider,
           name: name?.trim() || generateRandomAlias(),
           prefix: prefix ? prefix.trim() : null,
-          apiKey: isFollowUp ? "" : (firstActive ? firstActive.key : (normalizedEntries[0]?.key || "")),
-          apiKeys: normalizedEntries.map((e) => e.key),
-          keyEntries: normalizedEntries,
-          baseUrl: baseUrl?.trim() || null,
+          apiKey: primaryKey,
+          apiKeys: effectiveEntries.map((e) => e.key),
+          keyEntries: effectiveEntries,
+          baseUrl: effectiveBaseUrl,
+          baseUrls: effectiveBaseUrls,
+          apiGroups: normalizedApiGroups,
           isActive: 1,
           roundRobin: isFollowUp ? false : (roundRobin !== false),
           weight: weight ?? 1,
@@ -719,6 +835,25 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           )
         ),
         baseUrl: t.Optional(t.String()),
+        baseUrls: t.Optional(t.Array(t.String())),
+        apiGroups: t.Optional(
+          t.Array(
+            t.Object({
+              id: t.Optional(t.String()),
+              baseUrl: t.Optional(t.String()),
+              keyEntries: t.Optional(
+                t.Array(
+                  t.Object({
+                    id: t.Optional(t.String()),
+                    name: t.Optional(t.String()),
+                    key: t.String(),
+                    isActive: t.Optional(t.Boolean()),
+                  })
+                )
+              ),
+            })
+          )
+        ),
         weight: t.Optional(t.Number()),
         roundRobin: t.Optional(t.Boolean()),
         followUpstream: t.Optional(t.Boolean()),
@@ -755,7 +890,14 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
       if (body.name !== undefined) updateData.name = body.name.trim();
       if (body.prefix !== undefined) updateData.prefix = body.prefix ? body.prefix.trim() : null;
       if (body.provider !== undefined) updateData.provider = body.provider;
-      if (body.baseUrl !== undefined) updateData.baseUrl = body.baseUrl?.trim() || null;
+      if (body.baseUrl !== undefined || body.baseUrls !== undefined) {
+        const normalizedBaseUrls = normalizeBaseUrls(
+          body.baseUrls,
+          body.baseUrl !== undefined ? body.baseUrl : undefined
+        );
+        updateData.baseUrl = normalizedBaseUrls.primary;
+        updateData.baseUrls = normalizedBaseUrls.all.length > 0 ? JSON.stringify(normalizedBaseUrls.all) : null;
+      }
       if (body.isActive !== undefined) updateData.isActive = body.isActive ? 1 : 0;
       if (body.roundRobin !== undefined) updateData.roundRobin = body.roundRobin ? 1 : 0;
       if (body.weight !== undefined) updateData.weight = Math.max(1, body.weight);
@@ -839,6 +981,22 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         }
       }
 
+      // Multi API groups override the flattened fields above
+      if (body.apiGroups !== undefined) {
+        const groups = normalizeApiGroups(body.apiGroups);
+        updateData.apiGroups = groups.length > 0 ? JSON.stringify(groups) : null;
+        const flatEntries = groups.flatMap((g) => g.keyEntries);
+        if (flatEntries.length > 0) {
+          updateData.apiKeys = JSON.stringify(flatEntries);
+          updateData.apiKey = (flatEntries.find((k) => k.isActive) || flatEntries[0])!.key;
+        }
+        const groupUrls = groups.map((g) => g.baseUrl).filter(Boolean);
+        if (groupUrls.length > 0) {
+          updateData.baseUrl = groupUrls[0]!;
+          updateData.baseUrls = JSON.stringify(groupUrls);
+        }
+      }
+
       // Models update
       if (body.models !== undefined) {
         updateData.models = JSON.stringify(body.models);
@@ -870,6 +1028,25 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           )
         ),
         baseUrl: t.Optional(t.Nullable(t.String())),
+        baseUrls: t.Optional(t.Array(t.String())),
+        apiGroups: t.Optional(
+          t.Array(
+            t.Object({
+              id: t.Optional(t.String()),
+              baseUrl: t.Optional(t.String()),
+              keyEntries: t.Optional(
+                t.Array(
+                  t.Object({
+                    id: t.Optional(t.String()),
+                    name: t.Optional(t.String()),
+                    key: t.Optional(t.String()),
+                    isActive: t.Optional(t.Boolean()),
+                  })
+                )
+              ),
+            })
+          )
+        ),
         isActive: t.Optional(t.Boolean()),
         roundRobin: t.Optional(t.Boolean()),
         weight: t.Optional(t.Number()),
@@ -914,7 +1091,8 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
     }
 
     const isFollow = Boolean((upstream as any).followUpstream);
-    const key = getApiKeyForUpstream(upstream);
+    const upstreamTarget = getUpstreamTarget(upstream);
+    const key = upstreamTarget.apiKey;
     if (!key && !isFollow) {
       set.status = 400;
       return { success: false, error: "No API key configured for this upstream" };
@@ -1005,7 +1183,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
             console.error("Failed to fetch live models for BandelBanget:", e);
           }
         } else {
-          const url = `${getBaseUrl(upstream)}/models`;
+          const url = `${upstreamTarget.baseUrl}/models`;
           const res = await fetch(url, {
             headers: { Authorization: `Bearer ${key}` },
             signal: AbortSignal.timeout(12000),
@@ -1025,7 +1203,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         }
       } else {
         // Anthropic provider
-        const url = `${getBaseUrl(upstream)}/v1/models`;
+        const url = `${upstreamTarget.baseUrl}/v1/models`;
         try {
           const res = await fetch(url, {
             headers: {
@@ -1161,7 +1339,8 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
       return { success: false, error: "Upstream not found" };
     }
 
-    const key = getApiKeyForUpstream(upstream);
+    const upstreamTarget = getUpstreamTarget(upstream);
+    const key = upstreamTarget.apiKey;
     if (!key) {
       set.status = 400;
       return { success: false, error: "No API key configured or active for this upstream" };
@@ -1169,7 +1348,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
 
     const result = await testSingleKey(
       upstream.provider as "openai" | "anthropic",
-      upstream.baseUrl,
+      upstreamTarget.baseUrl,
       key
     );
     return result;

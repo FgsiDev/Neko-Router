@@ -75,6 +75,12 @@ export const GoogleIcon: React.FC<{ className?: string }> = ({ className = "w-4 
   </svg>
 );
 
+export interface FormApiGroup {
+  id: string;
+  baseUrl: string;
+  keys: FormKeyEntry[];
+}
+
 export interface FormKeyEntry {
   id: string;
   name: string;
@@ -203,6 +209,8 @@ export const UpstreamKeysTab: React.FC = () => {
     { id: "k_1", name: "Prod Key", key: "", isActive: true, showSecret: false },
   ]);
   const [baseUrl, setBaseUrl] = useState("");
+  const [multiMode, setMultiMode] = useState(false);
+  const [formGroups, setFormGroups] = useState<FormApiGroup[]>([]);
   const [weight, setWeight] = useState(1);
   const [roundRobin, setRoundRobin] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1061,10 +1069,23 @@ export const UpstreamKeysTab: React.FC = () => {
     }
   };
 
-  const openCreateModal = (preset?: Partial<ProviderPreset> | "openai" | "anthropic") => {
+  const openCreateModal = (
+    preset?:
+      | Partial<ProviderPreset>
+      | "openai"
+      | "anthropic"
+      | "multi-api"
+      | "multi-openai"
+      | "multi-anthropic"
+  ) => {
     setEditingUpstream(null);
     setCheckStatus(null);
     setModalError("");
+
+    const isMulti =
+      preset === "multi-api" || preset === "multi-openai" || preset === "multi-anthropic";
+    const isMultiAnthropic = preset === "multi-anthropic";
+    setMultiMode(isMulti);
 
     const presetObj = typeof preset === "object" ? (preset as ProviderPreset) : null;
     setActivePreset(presetObj);
@@ -1087,16 +1108,23 @@ export const UpstreamKeysTab: React.FC = () => {
         isCodex);
     setIsAccountMode(Boolean(isAccount));
 
-    if (preset === "anthropic") {
+    let initialBaseUrl = "";
+
+    if (isMulti) {
+      setProvider(isMultiAnthropic ? "anthropic" : "openai");
+      setAlias(isMultiAnthropic ? "Multi Anthropic Compatible" : "Multi OpenAI Compatible");
+      setPrefix("");
+      initialBaseUrl = "";
+    } else if (preset === "anthropic") {
       setProvider("anthropic");
       setAlias("Anthropic Claude");
       setPrefix("claude");
-      setBaseUrl("https://api.anthropic.com");
+      initialBaseUrl = "https://api.anthropic.com";
     } else if (preset === "openai" || !preset) {
       setProvider("openai");
       setAlias("");
       setPrefix("");
-      setBaseUrl("https://api.openai.com/v1");
+      initialBaseUrl = "https://api.openai.com/v1";
       handleGenerateAlias();
     } else {
       setProvider(preset.provider || "openai");
@@ -1114,10 +1142,31 @@ export const UpstreamKeysTab: React.FC = () => {
           .replace(/[^a-z0-9]/g, "")
           .slice(0, 12)
       );
-      setBaseUrl(preset.baseUrl || "");
+      initialBaseUrl = preset.baseUrl || "";
     }
 
-    setApiType("Chat Completions");
+    setBaseUrl(initialBaseUrl);
+    setFormGroups(
+      isMulti
+        ? [
+            {
+              id: `group_${Date.now()}_1`,
+              baseUrl: "",
+              keys: [
+                {
+                  id: `key_${Date.now()}_1`,
+                  name: "API Key #1",
+                  key: "",
+                  isActive: true,
+                  showSecret: false,
+                },
+              ],
+            },
+          ]
+        : []
+    );
+
+    setApiType(isMultiAnthropic ? "Anthropic Messages" : "Chat Completions");
     setWeight(1);
     setRoundRobin(true);
     setFormKeys([
@@ -1153,6 +1202,32 @@ export const UpstreamKeysTab: React.FC = () => {
     setAlias(item.name);
     setPrefix(item.prefix || "");
     setBaseUrl(item.baseUrl || "");
+    const existingGroups = item.apiGroups || [];
+    setMultiMode(existingGroups.length > 0);
+    setFormGroups(
+      existingGroups.map((group, gi) => ({
+        id: group.id || `group_${gi + 1}`,
+        baseUrl: group.baseUrl || "",
+        keys: (group.keyEntries?.length
+          ? group.keyEntries
+          : [
+              {
+                id: `k_${gi + 1}`,
+                name: "API Key #1",
+                key: item.apiKey || "",
+                isActive: true,
+              },
+            ]
+        ).map((keyEntry, ki) => ({
+          id: keyEntry.id || `k_${gi + 1}_${ki + 1}`,
+          name: keyEntry.name || `API Key #${ki + 1}`,
+          key: keyEntry.key || "",
+          isActive: keyEntry.isActive !== false,
+          showSecret: false,
+          jwtInfo: parseJwtInfo(keyEntry.key || ""),
+        })),
+      }))
+    );
     setApiType(item.provider === "anthropic" ? "Anthropic Messages" : "Chat Completions");
     setWeight(item.weight || 1);
     setRoundRobin(item.roundRobin !== false);
@@ -1311,9 +1386,185 @@ export const UpstreamKeysTab: React.FC = () => {
     setFormKeys(formKeys.filter((_, i) => i !== index));
   };
 
+  // Serializes Multi API groups: 1 Base URL + its own key pool per group.
+  const getGroupApiGroups = () =>
+    formGroups
+      .map((group) => ({
+        id: group.id,
+        baseUrl: group.baseUrl.trim().replace(/\/+$/, ""),
+        keyEntries: group.keys
+          .filter((k) => k.key.trim().length > 0)
+          .map((k, ki) => ({
+            id: k.id || `key_${Date.now()}_${ki + 1}`,
+            name: k.name.trim() || `API Key #${ki + 1}`,
+            key: k.key.trim(),
+            isActive: k.isActive,
+          })),
+      }))
+      .filter((group) => group.baseUrl.length > 0 || group.keyEntries.length > 0);
+
+  const handleGroupBaseUrlChange = (gi: number, val: string) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    if (!group) return;
+    updated[gi] = { ...group, baseUrl: val };
+    setFormGroups(updated);
+  };
+
+  const handleGroupKeyNameChange = (gi: number, ki: number, val: string) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    const key = group?.keys[ki];
+    if (!group || !key) return;
+    const keys = [...group.keys];
+    keys[ki] = { ...key, name: val };
+    updated[gi] = { ...group, keys };
+    setFormGroups(updated);
+  };
+
+  const handleGroupKeyValChange = (gi: number, ki: number, val: string) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    const key = group?.keys[ki];
+    if (!group || !key) return;
+
+    const splitKeys = val
+      .split(/[\n,]+/)
+      .map((k) => k.trim())
+      .filter(Boolean);
+    const keys = [...group.keys];
+    if (splitKeys.length > 1) {
+      keys.splice(
+        ki,
+        1,
+        ...splitKeys.map((k, i) => {
+          const jwt = parseJwtInfo(k);
+          return {
+            id: `key_${Date.now()}_${i}`,
+            name: jwt?.email || `API Key #${group.keys.length + i}`,
+            key: k,
+            isActive: true,
+            showSecret: false,
+            jwtInfo: jwt,
+          };
+        })
+      );
+    } else {
+      keys[ki] = { ...key, key: val };
+    }
+    updated[gi] = { ...group, keys };
+    setFormGroups(updated);
+  };
+
+  const handleToggleGroupKeyActive = (gi: number, ki: number) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    const key = group?.keys[ki];
+    if (!group || !key) return;
+    const keys = [...group.keys];
+    keys[ki] = { ...key, isActive: !key.isActive };
+    updated[gi] = { ...group, keys };
+    setFormGroups(updated);
+  };
+
+  const handleToggleGroupKeySecret = (gi: number, ki: number) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    const key = group?.keys[ki];
+    if (!group || !key) return;
+    const keys = [...group.keys];
+    keys[ki] = { ...key, showSecret: !key.showSecret };
+    updated[gi] = { ...group, keys };
+    setFormGroups(updated);
+  };
+
+  const handleAddGroupKey = (gi: number) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    if (!group) return;
+    updated[gi] = {
+      ...group,
+      keys: [
+        ...group.keys,
+        {
+          id: `key_${Date.now()}`,
+          name: `API Key #${group.keys.length + 1}`,
+          key: "",
+          isActive: true,
+          showSecret: false,
+        },
+      ],
+    };
+    setFormGroups(updated);
+  };
+
+  const handleRemoveGroupKey = (gi: number, ki: number) => {
+    const updated = [...formGroups];
+    const group = updated[gi];
+    if (!group) return;
+    const keys =
+      group.keys.length <= 1
+        ? [
+            {
+              id: `key_${Date.now()}`,
+              name: "API Key #1",
+              key: "",
+              isActive: true,
+              showSecret: false,
+            },
+          ]
+        : group.keys.filter((_, i) => i !== ki);
+    updated[gi] = { ...group, keys };
+    setFormGroups(updated);
+  };
+
+  const handleAddGroup = () => {
+    const idx = formGroups.length + 1;
+    setFormGroups([
+      ...formGroups,
+      {
+        id: `group_${Date.now()}_${idx}`,
+        baseUrl: "",
+        keys: [
+          {
+            id: `key_${Date.now()}_${idx}`,
+            name: `API Key #${idx}`,
+            key: "",
+            isActive: true,
+            showSecret: false,
+          },
+        ],
+      },
+    ]);
+  };
+
+  const handleRemoveGroup = (gi: number) => {
+    if (formGroups.length <= 1) {
+      setFormGroups([
+        {
+          id: `group_${Date.now()}_1`,
+          baseUrl: "",
+          keys: [
+            {
+              id: `key_${Date.now()}_1`,
+              name: "API Key #1",
+              key: "",
+              isActive: true,
+              showSecret: false,
+            },
+          ],
+        },
+      ]);
+      return;
+    }
+    setFormGroups(formGroups.filter((_, i) => i !== gi));
+  };
+
   // Check connection button inside Modal (9Router style)
   const handleCheckConnectionInModal = async () => {
-    const firstKey = formKeys.find((k) => k.key.trim().length > 0);
+    const firstKey = multiMode
+      ? formGroups.flatMap((g) => g.keys).find((k) => k.key.trim().length > 0)
+      : formKeys.find((k) => k.key.trim().length > 0);
     if (!firstKey) {
       setModalError("Please enter an API key to check connection");
       return;
@@ -1332,7 +1583,7 @@ export const UpstreamKeysTab: React.FC = () => {
         method: "POST",
         body: JSON.stringify({
           provider,
-          baseUrl: baseUrl || null,
+          baseUrl: multiMode ? (getGroupApiGroups()[0]?.baseUrl || null) : (baseUrl || null),
           apiKey: firstKey.key.trim(),
         }),
       });
@@ -1358,7 +1609,28 @@ export const UpstreamKeysTab: React.FC = () => {
         isActive: k.isActive,
       }));
 
-    if (cleanKeys.length === 0) {
+    const cleanGroups = multiMode ? getGroupApiGroups() : [];
+
+    if (multiMode) {
+      if (cleanGroups.length === 0) {
+        setModalError("Please add at least one API with a Base URL and API Key");
+        return;
+      }
+      const missingUrl = cleanGroups.findIndex((g) => !g.baseUrl);
+      if (missingUrl >= 0) {
+        setModalError(`API #${missingUrl + 1} needs a Base URL`);
+        return;
+      }
+      const missingKey = cleanGroups.findIndex((g) => g.keyEntries.length === 0);
+      if (missingKey >= 0) {
+        setModalError(`API #${missingKey + 1} needs at least one API Key`);
+        return;
+      }
+    }
+
+    const effectiveKeys = multiMode ? cleanGroups.flatMap((g) => g.keyEntries) : cleanKeys;
+
+    if (effectiveKeys.length === 0) {
       setModalError(
         isAccountMode
           ? "Please connect or provide at least one GitHub Copilot account"
@@ -1366,6 +1638,12 @@ export const UpstreamKeysTab: React.FC = () => {
       );
       return;
     }
+
+    const cleanBaseUrls = multiMode
+      ? cleanGroups.map((g) => g.baseUrl)
+      : baseUrl.trim()
+        ? [baseUrl.trim().replace(/\/+$/, "")]
+        : [];
 
     const resolvedName = isAccountMode
       ? (alias?.trim() ||
@@ -1386,13 +1664,13 @@ export const UpstreamKeysTab: React.FC = () => {
       : (prefix ? prefix.trim() : null);
 
     const resolvedBaseUrl = isAccountMode
-      ? (baseUrl ||
+      ? (cleanBaseUrls[0] ||
           (activePreset?.id === "antigravity"
             ? "https://daily-cloudcode-pa.googleapis.com"
             : activePreset?.id === "openai-codex"
               ? "https://chatgpt.com/backend-api/codex/responses"
               : "https://api.githubcopilot.com"))
-      : (baseUrl || undefined);
+      : (cleanBaseUrls[0] || undefined);
 
     setSaving(true);
     try {
@@ -1403,8 +1681,10 @@ export const UpstreamKeysTab: React.FC = () => {
             provider,
             name: resolvedName,
             prefix: resolvedPrefix,
-            keyEntries: cleanKeys,
+            keyEntries: effectiveKeys,
             baseUrl: resolvedBaseUrl || null,
+            baseUrls: cleanBaseUrls,
+            apiGroups: cleanGroups,
             weight,
             roundRobin,
           }),
@@ -1417,8 +1697,10 @@ export const UpstreamKeysTab: React.FC = () => {
             provider,
             name: resolvedName,
             prefix: resolvedPrefix,
-            keyEntries: cleanKeys,
+            keyEntries: effectiveKeys,
             baseUrl: resolvedBaseUrl,
+            baseUrls: cleanBaseUrls,
+            apiGroups: cleanGroups,
             weight,
             roundRobin,
           }),
@@ -2191,6 +2473,24 @@ export const UpstreamKeysTab: React.FC = () => {
             <Plus className="w-3.5 h-3.5" />
             <span>Add OpenAI Compatible</span>
           </button>
+
+          <button
+            onClick={() => openCreateModal("multi-openai")}
+            className="skeuo-btn px-3 py-1.5 rounded-md text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:border-emerald-500/40 inline-flex items-center space-x-1.5 cursor-pointer"
+            title="Multi API for OpenAI Compatible: many Base URLs, each with its own multi API key pool (2x round robin)"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>Multi API For OpenAI Compatible</span>
+          </button>
+
+          <button
+            onClick={() => openCreateModal("multi-anthropic")}
+            className="skeuo-btn px-3 py-1.5 rounded-md text-xs font-semibold text-amber-600 dark:text-amber-400 hover:border-amber-500/40 inline-flex items-center space-x-1.5 cursor-pointer"
+            title="Multi API for Anthropic Compatible: many Base URLs, each with its own multi API key pool (2x round robin)"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>Multi API For Anthropic Compatible</span>
+          </button>
         </div>
       </div>
 
@@ -2216,7 +2516,7 @@ export const UpstreamKeysTab: React.FC = () => {
                   No custom providers configured
                 </p>
                 <p className="text-[11px] text-zinc-400 mt-1 max-w-md mx-auto">
-                  Click <strong>"+ Add OpenAI Compatible"</strong> or <strong>"+ Add Anthropic Compatible"</strong> to connect your custom proxy, Ryzumi AI, BandelBanget, or local endpoints.
+                  Click <strong>"+ Add OpenAI Compatible"</strong>, <strong>"+ Add Anthropic Compatible"</strong>, <strong>"Multi API For OpenAI Compatible"</strong>, or <strong>"Multi API For Anthropic Compatible"</strong> to connect custom proxies. Multi API lets you add several Base URLs, each with its own multi API key pool (2x round-robin).
                 </p>
               </div>
             ) : (
@@ -2295,8 +2595,20 @@ export const UpstreamKeysTab: React.FC = () => {
                         </div>
 
                         {/* Base URL Subtitle */}
-                        <div className="mt-2.5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 truncate bg-zinc-100/70 dark:bg-zinc-900/60 px-2 py-1 rounded">
-                          {item.baseUrl || (item.provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com")}
+                        <div className="mt-2.5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 bg-zinc-100/70 dark:bg-zinc-900/60 px-2 py-1 rounded flex items-center gap-1.5">
+                          <span className="truncate">
+                            {item.baseUrl || (item.provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com")}
+                          </span>
+                          {((item.apiGroups?.length || 0) > 0 || (item.baseUrls?.length || 0) > 1) && (
+                            <span
+                              className="shrink-0 text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold"
+                              title={(item.apiGroups?.length ? item.apiGroups.map((g) => g.baseUrl) : item.baseUrls)?.join("\n")}
+                            >
+                              {item.apiGroups?.length
+                                ? `${item.apiGroups.length} APIs`
+                                : `${item.baseUrls!.length} URLs`}
+                            </span>
+                          )}
                         </div>
 
                         {/* Quick Keys Preview & Per-Key Delete */}
@@ -2801,8 +3113,18 @@ export const UpstreamKeysTab: React.FC = () => {
                               Managed OAuth
                             </span>
                           ) : item.baseUrl ? (
-                            <span className="font-mono text-[11px] truncate max-w-[150px] inline-block" title={item.baseUrl}>
-                              {item.baseUrl}
+                            <span
+                              className="inline-flex items-center gap-1 max-w-[180px]"
+                              title={(item.apiGroups?.length ? item.apiGroups.map((g) => g.baseUrl) : item.baseUrls)?.join("\n") || item.baseUrl}
+                            >
+                              <span className="font-mono text-[11px] truncate">{item.baseUrl}</span>
+                              {((item.apiGroups?.length || 0) > 0 || (item.baseUrls?.length || 0) > 1) && (
+                                <span className="shrink-0 text-[9px] px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold">
+                                  {item.apiGroups?.length
+                                    ? `+${item.apiGroups.length - 1} APIs`
+                                    : `+${item.baseUrls!.length - 1}`}
+                                </span>
+                              )}
                             </span>
                           ) : (
                             <span className="text-[11px] text-zinc-400 italic">Default</span>
@@ -2959,8 +3281,10 @@ export const UpstreamKeysTab: React.FC = () => {
                           : "Setup GitHub Copilot"
                         : "Setup OAuth Provider"
                   : editingUpstream
-                    ? `Edit ${editingUpstream.name || (provider === "openai" ? "OpenAI" : "Anthropic") + " Compatible"}`
-                    : `Add ${provider === "openai" ? "OpenAI" : "Anthropic"} Compatible`}
+                    ? `Edit ${editingUpstream.name || (multiMode ? "Multi API Pool" : (provider === "openai" ? "OpenAI" : "Anthropic") + " Compatible")}`
+                    : multiMode
+                      ? `Add Multi API For ${provider === "openai" ? "OpenAI" : "Anthropic"} Compatible`
+                      : `Add ${provider === "openai" ? "OpenAI" : "Anthropic"} Compatible`}
               </h3>
             </div>
 
@@ -3140,27 +3464,175 @@ export const UpstreamKeysTab: React.FC = () => {
                     </select>
                   </div>
 
-                  {/* Base URL */}
-                  <div>
-                    <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                      Base URL *
-                    </label>
-                    <input
-                      type="url"
-                      required
-                      value={baseUrl}
-                      onChange={(e) => setBaseUrl(e.target.value)}
-                      placeholder={provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com"}
-                      className="w-full px-3 py-2 rounded-md skeuo-inset font-mono text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-600"
-                    />
-                    <p className="mt-1 text-[10px] text-zinc-400">
-                      Use the base URL (ending in /v1 for OpenAI compatible).
-                    </p>
-                  </div>
+                  {/* Base URL (single mode only; Multi API groups carry their own) */}
+                  {!multiMode ? (
+                    <div>
+                      <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                        Base URL *
+                      </label>
+                      <input
+                        type="url"
+                        required
+                        value={baseUrl}
+                        onChange={(e) => setBaseUrl(e.target.value)}
+                        placeholder={provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com"}
+                        className="w-full px-3 py-2 rounded-md skeuo-inset font-mono text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-600"
+                      />
+                      <p className="mt-1 text-[10px] text-zinc-400">
+                        Use the base URL (ending in /v1 for OpenAI compatible).
+                      </p>
+                    </div>
+                  ) : null}
                 </>
               ) : null}
 
-              {/* Multi-Key Pool / Account Pool & Round Robin */}
+              {/* Multi API: each group = multi API keys + 1 Base URL below them */}
+              {multiMode && (
+                <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <label className="font-semibold text-zinc-800 dark:text-zinc-200 text-xs flex items-center space-x-1.5">
+                        <Layers className="w-3.5 h-3.5 text-emerald-500" />
+                        <span>Multi API Groups ({formGroups.length})</span>
+                      </label>
+                      <p className="text-[10px] text-zinc-400 mt-0.5">
+                        Each group owns its own API key pool and one Base URL. Round robin rotates groups, then keys inside the selected group.
+                      </p>
+                    </div>
+                    <div className="flex items-center space-x-1.5 shrink-0">
+                      <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                        Round Robin
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setRoundRobin(!roundRobin)}
+                        className="p-1 cursor-pointer"
+                        title="Rotate Base URL groups and keys inside each group (2x)"
+                      >
+                        {roundRobin ? (
+                          <ToggleRight className="w-5 h-5 text-emerald-500" />
+                        ) : (
+                          <ToggleLeft className="w-5 h-5 text-zinc-400" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {formGroups.map((group, gi) => (
+                    <div
+                      key={group.id}
+                      className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/40 space-y-2.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
+                          API #{gi + 1} — {group.baseUrl || "Base URL not set"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveGroup(gi)}
+                          className="p-1 text-zinc-400 hover:text-red-500 cursor-pointer transition-colors"
+                          title="Remove this Base URL and its keys"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      {/* Base URL for this group, placed above its key pool */}
+                      <div>
+                        <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                          Base URL *
+                        </label>
+                        <input
+                          type="url"
+                          value={group.baseUrl}
+                          onChange={(e) => handleGroupBaseUrlChange(gi, e.target.value)}
+                          placeholder={provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com"}
+                          className="w-full px-3 py-2 rounded-md skeuo-inset font-mono text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-600"
+                        />
+                      </div>
+
+                      {/* Multi API key pool for this group */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="font-semibold text-zinc-700 dark:text-zinc-300 text-xs flex items-center space-x-1.5">
+                            <KeyRound className="w-3.5 h-3.5 text-indigo-500" />
+                            <span>API Key Pool ({group.keys.length} keys) *</span>
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => handleAddGroupKey(gi)}
+                            className="inline-flex items-center space-x-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Add Key Row</span>
+                          </button>
+                        </div>
+
+                        {group.keys.map((k, ki) => (
+                          <div key={k.id} className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={k.name}
+                              onChange={(e) => handleGroupKeyNameChange(gi, ki, e.target.value)}
+                              placeholder={`Key #${ki + 1}`}
+                              className="w-24 sm:w-32 shrink-0 text-[11px] font-semibold px-2 py-1.5 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100"
+                            />
+                            <div className="relative flex-1 min-w-0">
+                              <input
+                                type={k.showSecret ? "text" : "password"}
+                                value={k.key}
+                                onChange={(e) => handleGroupKeyValChange(gi, ki, e.target.value)}
+                                placeholder={provider === "openai" ? "sk-proj-... (or paste multiple keys)" : "sk-ant-..."}
+                                className="w-full px-2 py-1.5 pl-7 pr-7 rounded-md skeuo-inset font-mono text-xs text-zinc-900 dark:text-zinc-100"
+                              />
+                              <KeyRound className="w-3.5 h-3.5 text-zinc-400 absolute left-2 top-2" />
+                              <button
+                                type="button"
+                                onClick={() => handleToggleGroupKeySecret(gi, ki)}
+                                className="absolute right-2 top-1.5 text-zinc-400 hover:text-zinc-600 cursor-pointer"
+                              >
+                                {k.showSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleGroupKeyActive(gi, ki)}
+                              className="p-0.5 cursor-pointer shrink-0"
+                              title={k.isActive ? "Disable key" : "Enable key"}
+                            >
+                              {k.isActive ? (
+                                <ToggleRight className="w-5 h-5 text-emerald-500" />
+                              ) : (
+                                <ToggleLeft className="w-5 h-5 text-zinc-400" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveGroupKey(gi, ki)}
+                              className="p-1 text-zinc-400 hover:text-red-500 cursor-pointer transition-colors shrink-0"
+                              title="Remove key"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+
+                  <button
+                    type="button"
+                    onClick={handleAddGroup}
+                    className="w-full py-2 rounded-lg border border-dashed border-emerald-500/40 text-emerald-600 dark:text-emerald-400 text-xs font-semibold inline-flex items-center justify-center space-x-1.5 hover:bg-emerald-500/5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Base URL (next API group)</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Multi-Key Pool / Account Pool & Round Robin (single mode only) */}
+              {!multiMode && (
               <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800">
                 <div className="flex items-center justify-between mb-2">
                   <div>
@@ -3202,7 +3674,7 @@ export const UpstreamKeysTab: React.FC = () => {
                       type="button"
                       onClick={() => setRoundRobin(!roundRobin)}
                       className="p-1 cursor-pointer"
-                      title="Rotate requests across active accounts/keys in this pool"
+                      title={multiMode ? "Rotate across active Base URLs AND active API Keys (2x)" : "Rotate requests across active accounts/keys in this pool"}
                     >
                       {roundRobin ? (
                         <ToggleRight className="w-5 h-5 text-emerald-500" />
@@ -3411,6 +3883,7 @@ export const UpstreamKeysTab: React.FC = () => {
                   </div>
                 )}
               </div>
+              )}
 
               {/* Check button & result (matching 9Router screenshot 3) */}
               <div className="pt-2">

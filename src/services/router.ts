@@ -8,6 +8,8 @@ let roundRobinIndex: Record<string, number> = {
 };
 
 let keyRotationIndex: Record<string, number> = {};
+let baseUrlRotationIndex: Record<string, number> = {};
+let groupRotationIndex: Record<string, number> = {};
 
 export interface ModelConfig {
   id: string;
@@ -72,6 +74,148 @@ export interface UpstreamKeyEntry {
   createdAt?: number;
   refreshToken?: string;
   expiresAt?: number;
+}
+
+export function parseUpstreamBaseUrls(
+  baseUrlsJson?: string | null,
+  fallbackBaseUrl?: string | null
+): string[] {
+  if (baseUrlsJson) {
+    try {
+      const parsed = JSON.parse(baseUrlsJson);
+      if (Array.isArray(parsed)) {
+        const urls = parsed
+          .map((u) => (typeof u === "string" ? u.trim() : ""))
+          .filter((u) => u.length > 0)
+          .map((u) => u.replace(/\/+$/, ""));
+        if (urls.length > 0) return urls;
+      }
+    } catch (e) {}
+  }
+
+  if (fallbackBaseUrl && fallbackBaseUrl.trim().length > 0) {
+    return [fallbackBaseUrl.trim().replace(/\/+$/, "")];
+  }
+
+  return [];
+}
+
+export function getBaseUrlForUpstream(upstream: UpstreamKey): string {
+  const urls = parseUpstreamBaseUrls((upstream as any).baseUrls, upstream.baseUrl);
+  const isRoundRobin = (upstream as any).roundRobin !== 0;
+
+  if (urls.length === 0) {
+    if (upstream.provider === "openai") {
+      return "https://api.openai.com/v1";
+    }
+    return "https://api.anthropic.com";
+  }
+
+  if (urls.length === 1 || !isRoundRobin) {
+    return urls[0]!;
+  }
+
+  const idx = (baseUrlRotationIndex[upstream.id] || 0) % urls.length;
+  baseUrlRotationIndex[upstream.id] = (idx + 1) % urls.length;
+  return urls[idx]!;
+}
+
+export interface ApiGroup {
+  id: string;
+  baseUrl: string;
+  keyEntries: UpstreamKeyEntry[];
+}
+
+export function parseApiGroups(groupsJson?: string | null): ApiGroup[] {
+  if (!groupsJson) return [];
+  try {
+    const parsed = JSON.parse(groupsJson);
+    if (!Array.isArray(parsed)) return [];
+
+    const result: ApiGroup[] = [];
+    parsed.forEach((group: any, gi: number) => {
+      if (!group || typeof group !== "object") return;
+      const baseUrl =
+        typeof group.baseUrl === "string"
+          ? group.baseUrl.trim().replace(/\/+$/, "")
+          : "";
+
+      const keyEntries: UpstreamKeyEntry[] = [];
+      const rawKeys = Array.isArray(group.keyEntries) ? group.keyEntries : [];
+      rawKeys.forEach((entry: any, ki: number) => {
+        const key =
+          typeof entry === "string"
+            ? entry.trim()
+            : typeof entry?.key === "string"
+              ? entry.key.trim()
+              : "";
+        if (!key) return;
+        keyEntries.push({
+          id: entry?.id || `group_${gi + 1}_key_${ki + 1}`,
+          name: entry?.name || `API Key #${ki + 1}`,
+          key,
+          isActive: entry?.isActive !== false,
+          createdAt: entry?.createdAt,
+          refreshToken: typeof entry?.refreshToken === "string" ? entry.refreshToken : undefined,
+          expiresAt: typeof entry?.expiresAt === "number" ? entry.expiresAt : undefined,
+        });
+      });
+
+      if (!baseUrl && keyEntries.length === 0) return;
+      result.push({
+        id: typeof group.id === "string" && group.id ? group.id : `group_${gi + 1}`,
+        baseUrl,
+        keyEntries,
+      });
+    });
+    return result;
+  } catch (e) {
+    return [];
+  }
+}
+
+export interface UpstreamTarget {
+  baseUrl: string;
+  apiKey: string;
+  keyEntries: UpstreamKeyEntry[];
+}
+
+// Multi API mode: each group owns exactly one Base URL plus its own key pool.
+// Round robin rotates groups first, then keys inside the selected group (2x).
+export function getUpstreamTarget(upstream: UpstreamKey): UpstreamTarget {
+  const groups = parseApiGroups((upstream as any).apiGroups).filter((g) =>
+    g.keyEntries.some((k) => k.isActive)
+  );
+
+  if (groups.length > 0) {
+    const isRoundRobin = (upstream as any).roundRobin !== 0;
+    const groupIndex = isRoundRobin
+      ? (groupRotationIndex[upstream.id] || 0) % groups.length
+      : 0;
+    if (isRoundRobin) {
+      groupRotationIndex[upstream.id] = (groupIndex + 1) % groups.length;
+    }
+    const group = groups[groupIndex]!;
+    const activeKeys = group.keyEntries.filter((k) => k.isActive);
+    const keyRotationKey = `${upstream.id}:${group.id}`;
+    const keyIndex = isRoundRobin
+      ? (keyRotationIndex[keyRotationKey] || 0) % activeKeys.length
+      : 0;
+    if (isRoundRobin) {
+      keyRotationIndex[keyRotationKey] = (keyIndex + 1) % activeKeys.length;
+    }
+    return {
+      baseUrl: group.baseUrl || getBaseUrl(upstream),
+      apiKey: activeKeys[keyIndex]!.key,
+      keyEntries: activeKeys,
+    };
+  }
+
+  return {
+    baseUrl: getBaseUrlForUpstream(upstream),
+    apiKey: getApiKeyForUpstream(upstream),
+    keyEntries: getActiveUpstreamKeyEntries(upstream),
+  };
 }
 
 export function parseUpstreamKeyEntries(

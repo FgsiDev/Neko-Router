@@ -41,6 +41,8 @@ export const upstreamKeys = sqliteTable("upstream_keys", {
   apiKeys: text("api_keys"), // JSON array string of string[]: pool of keys for load-balancing
   models: text("models"), // JSON array string of { id: string; name?: string; enabled: boolean }[]
   baseUrl: text("base_url"), // e.g. https://api.openai.com/v1 or custom proxy
+  baseUrls: text("base_urls"), // JSON array string of string[]: pool of base URLs for load-balancing
+  apiGroups: text("api_groups"), // JSON array of { id, baseUrl, keyEntries } groups (Multi API mode)
   isActive: integer("is_active").notNull().default(1),
   roundRobin: integer("round_robin").notNull().default(1), // 1 = round-robin across active keys, 0 = primary/sequential
   weight: integer("weight").notNull().default(1),

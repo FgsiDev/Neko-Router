@@ -58,6 +58,8 @@ export function initTablesSync(): void {
       api_keys TEXT,
       models TEXT,
       base_url TEXT,
+      base_urls TEXT,
+      api_groups TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
       round_robin INTEGER NOT NULL DEFAULT 1,
       weight INTEGER NOT NULL DEFAULT 1,
@@ -151,6 +153,12 @@ export function initTablesSync(): void {
   } catch (e) {}
   try {
     sqlite.run("ALTER TABLE upstream_keys ADD COLUMN api_keys TEXT;");
+  } catch (e) {}
+  try {
+    sqlite.run("ALTER TABLE upstream_keys ADD COLUMN base_urls TEXT;");
+  } catch (e) {}
+  try {
+    sqlite.run("ALTER TABLE upstream_keys ADD COLUMN api_groups TEXT;");
   } catch (e) {}
   try {
     sqlite.run("ALTER TABLE upstream_keys ADD COLUMN models TEXT;");
