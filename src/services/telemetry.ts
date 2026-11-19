@@ -23,6 +23,9 @@ export interface LogTelemetryParams {
   durationMs: number;
   isStreaming: boolean;
   errorMessage?: string | null;
+  baseUrl?: string | null;
+  upstreamGroupId?: string | null;
+  selectedKeyId?: string | null;
 }
 
 function usageStatId(
@@ -61,6 +64,9 @@ export function recordTelemetry(params: LogTelemetryParams): void {
  durationMs,
  isStreaming: params.isStreaming ? 1 : 0,
  errorMessage: params.errorMessage ?? null,
+ baseUrl: params.baseUrl ?? null,
+ upstreamGroupId: params.upstreamGroupId ?? null,
+ selectedKeyId: params.selectedKeyId ?? null,
  createdAt: now,
  })
  .run();
@@ -421,6 +427,9 @@ let successCount = 0;
 let rawModelStats: {
  model: string;
  provider: string;
+ baseUrl?: string | null;
+ upstreamGroupId?: string | null;
+ selectedKeyId?: string | null;
  requests: number;
  promptTokens: number;
  completionTokens: number;
@@ -458,6 +467,9 @@ if (isAll) {
  .select({
  model: usageStats.model,
  provider: usageStats.provider,
+ baseUrl: sql<string | null>`null`,
+ upstreamGroupId: sql<string | null>`null`,
+ selectedKeyId: sql<string | null>`null`,
  requests: sql<number>`coalesce(sum(${usageStats.requests}), 0)`,
  promptTokens: sql<number>`coalesce(sum(${usageStats.promptTokens}), 0)`,
  completionTokens: sql<number>`coalesce(sum(${usageStats.completionTokens}), 0)`,
@@ -495,6 +507,9 @@ if (isAll) {
  .select({
  model: telemetryLogs.model,
  provider: telemetryLogs.provider,
+ baseUrl: telemetryLogs.baseUrl,
+ upstreamGroupId: telemetryLogs.upstreamGroupId,
+ selectedKeyId: telemetryLogs.selectedKeyId,
  requests: sql<number>`count(*)`,
  promptTokens: sql<number>`coalesce(sum(${telemetryLogs.promptTokens}), 0)`,
  completionTokens: sql<number>`coalesce(sum(${telemetryLogs.completionTokens}), 0)`,
@@ -503,7 +518,13 @@ if (isAll) {
  })
  .from(telemetryLogs)
  .where(totalWhere)
- .groupBy(telemetryLogs.model, telemetryLogs.provider)
+ .groupBy(
+   telemetryLogs.model,
+   telemetryLogs.provider,
+   telemetryLogs.baseUrl,
+   telemetryLogs.upstreamGroupId,
+   telemetryLogs.selectedKeyId
+ )
  .all();
 }
 
@@ -518,6 +539,9 @@ if (isAll) {
     return {
       model: ms.model,
       provider: ms.provider,
+      baseUrl: (ms as any).baseUrl ?? null,
+      upstreamGroupId: (ms as any).upstreamGroupId ?? null,
+      selectedKeyId: (ms as any).selectedKeyId ?? null,
       requests: Number(ms.requests || 0),
       promptTokens: prompt,
       completionTokens: completion,

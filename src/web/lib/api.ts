@@ -177,6 +177,9 @@ export interface TelemetryStats {
     completionTokens?: number;
     cachedTokens?: number;
     estimatedCost?: number;
+    baseUrl?: string | null;
+    upstreamGroupId?: string | null;
+    selectedKeyId?: string | null;
   }[];
   activeUpstreamIds?: string[];
   activeRequestsCount?: number;
@@ -198,6 +201,9 @@ export interface TelemetryLogItem {
  durationMs: number;
  isStreaming: number;
  errorMessage: string | null;
+ baseUrl: string | null;
+ upstreamGroupId: string | null;
+ selectedKeyId: string | null;
  createdAt: number;
 }
 

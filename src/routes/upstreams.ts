@@ -213,6 +213,29 @@ export function normalizeApiGroups(
   return groups;
 }
 
+function buildGroupSyncFields(groups: Array<{ id: string; baseUrl: string; keyEntries: UpstreamKeyEntry[] }>) {
+  const flatEntries = groups.flatMap((g) => g.keyEntries);
+  const groupUrls = groups.map((g) => g.baseUrl).filter(Boolean);
+  const firstActive = flatEntries.find((k) => k.isActive) || flatEntries[0];
+  return {
+    apiKey: firstActive?.key || "",
+    apiKeys: JSON.stringify(flatEntries),
+    baseUrl: groupUrls[0] || null,
+    baseUrls: groupUrls.length > 0 ? JSON.stringify(groupUrls) : null,
+    apiGroups: JSON.stringify(groups),
+  };
+}
+
+function mapKeyEntriesResponse(entries: UpstreamKeyEntry[]) {
+  return entries.map((e) => ({
+    id: e.id,
+    name: e.name,
+    maskedKey: maskKey(e.key),
+    isActive: e.isActive,
+    createdAt: e.createdAt,
+  }));
+}
+
 async function testSingleKey(
   provider: "openai" | "anthropic",
   baseUrl: string | null,
@@ -905,7 +928,10 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
 
       // Multiple keys update - gracefully merge if key is omitted
       if (body.keyEntries !== undefined) {
-        const existingEntries = parseUpstreamKeyEntries(existing.apiKeys, existing.apiKey);
+        const existingGroups = parseApiGroups((existing as any).apiGroups);
+        const existingEntries = existingGroups.length > 0
+          ? existingGroups.flatMap((g) => g.keyEntries)
+          : parseUpstreamKeyEntries(existing.apiKeys, existing.apiKey);
         const existingMap = new Map(existingEntries.map((e) => [e.id, e]));
 
         const normalized: UpstreamKeyEntry[] = [];
@@ -931,9 +957,18 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
           });
         }
         if (normalized.length > 0) {
-          updateData.apiKeys = JSON.stringify(normalized);
-          const firstActive = normalized.find((k) => k.isActive);
-          updateData.apiKey = firstActive ? firstActive.key : normalized[0]!.key;
+          if (existingGroups.length > 0) {
+            // Grouped upstream: apply updates/renames inside groups
+            const normMap = new Map(normalized.map((e) => [e.id, e]));
+            for (const g of existingGroups) {
+              g.keyEntries = g.keyEntries.map((e) => normMap.get(e.id) || e);
+            }
+            Object.assign(updateData, buildGroupSyncFields(existingGroups));
+          } else {
+            updateData.apiKeys = JSON.stringify(normalized);
+            const firstActive = normalized.find((k) => k.isActive);
+            updateData.apiKey = firstActive ? firstActive.key : normalized[0]!.key;
+          }
         }
       } else if (body.rawKeys !== undefined && body.rawKeys.trim().length > 0) {
         const parsed = parseRawKeysInput(body.rawKeys, "API Key", 1);
@@ -1372,9 +1407,26 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "Follow Upstream is a zero-key pass-through provider and cannot accept API keys." };
       }
 
-      const existingEntries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
-      const newEntries: UpstreamKeyEntry[] = [];
       const now = Date.now();
+      const groups = parseApiGroups((upstream as any).apiGroups);
+      const isGrouped = groups.length > 0;
+      let targetGroupIndex = 0;
+
+      if (isGrouped) {
+        if (body.groupId) {
+          const idx = groups.findIndex((g) => g.id === body.groupId);
+          if (idx === -1) {
+            set.status = 404;
+            return { success: false, error: "Group not found" };
+          }
+          targetGroupIndex = idx;
+        }
+      }
+
+      const existingEntries = isGrouped
+        ? groups[targetGroupIndex]!.keyEntries
+        : parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
+      const newEntries: UpstreamKeyEntry[] = [];
 
       // Support single key
       if (body.key && body.key.trim().length > 0) {
@@ -1437,30 +1489,33 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "No valid keys provided to add" };
       }
 
-      const merged = [...existingEntries, ...newEntries];
-      const firstActive = merged.find((k) => k.isActive);
+      let allEntries: UpstreamKeyEntry[];
+      const updateSet: any = { updatedAt: now };
+
+      if (isGrouped) {
+        groups[targetGroupIndex]!.keyEntries = [...existingEntries, ...newEntries];
+        Object.assign(updateSet, buildGroupSyncFields(groups));
+        allEntries = groups.flatMap((g) => g.keyEntries);
+      } else {
+        const merged = [...existingEntries, ...newEntries];
+        const firstActive = merged.find((k) => k.isActive);
+        updateSet.apiKey = firstActive ? firstActive.key : merged[0]!.key;
+        updateSet.apiKeys = JSON.stringify(merged);
+        allEntries = merged;
+      }
 
       db.update(upstreamKeys)
-        .set({
-          apiKey: firstActive ? firstActive.key : merged[0]!.key,
-          apiKeys: JSON.stringify(merged),
-          updatedAt: now,
-        })
+        .set(updateSet)
         .where(eq(upstreamKeys.id, id))
         .run();
 
       return {
         success: true,
         addedCount: newEntries.length,
-        totalKeysCount: merged.length,
-        activeKeysCount: merged.filter((k) => k.isActive).length,
-        keyEntries: merged.map((e) => ({
-          id: e.id,
-          name: e.name,
-          maskedKey: maskKey(e.key),
-          isActive: e.isActive,
-          createdAt: e.createdAt,
-        })),
+        totalKeysCount: allEntries.length,
+        activeKeysCount: allEntries.filter((k) => k.isActive).length,
+        keyEntries: mapKeyEntriesResponse(isGrouped ? groups[targetGroupIndex]!.keyEntries : allEntries),
+        ...(isGrouped ? { apiGroups: groups } : {}),
       };
     },
     {
@@ -1480,6 +1535,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
             })
           )
         ),
+        groupId: t.Optional(t.String()),
       }),
     }
   )
@@ -1502,7 +1558,23 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "Follow Upstream is a zero-key pass-through provider and cannot accept API keys." };
       }
 
-      const existingEntries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
+      const groups = parseApiGroups((upstream as any).apiGroups);
+      const isGrouped = groups.length > 0;
+      let targetGroupIndex = 0;
+      if (isGrouped) {
+        if (body.groupId) {
+          const idx = groups.findIndex((g) => g.id === body.groupId);
+          if (idx === -1) {
+            set.status = 404;
+            return { success: false, error: "Group not found" };
+          }
+          targetGroupIndex = idx;
+        }
+      }
+
+      const existingEntries = isGrouped
+        ? groups[targetGroupIndex]!.keyEntries
+        : parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
       const existingKeySet = new Set(existingEntries.map((e) => e.key));
       const seenBatchKeySet = new Set<string>();
 
@@ -1573,32 +1645,40 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
       }
 
       if (toAdd.length === 0) {
+        const respEntries = isGrouped ? groups[targetGroupIndex]!.keyEntries : existingEntries;
+        const allEntries = isGrouped ? groups.flatMap((g) => g.keyEntries) : existingEntries;
         return {
           success: true,
           importedCount: 0,
           duplicatesSkipped,
           message: "All provided keys already exist in the connection pool.",
-          totalKeysCount: existingEntries.length,
-          activeKeysCount: existingEntries.filter((k) => k.isActive).length,
-          keyEntries: existingEntries.map((e) => ({
-            id: e.id,
-            name: e.name,
-            maskedKey: maskKey(e.key),
-            isActive: e.isActive,
-            createdAt: e.createdAt,
-          })),
+          totalKeysCount: allEntries.length,
+          activeKeysCount: allEntries.filter((k) => k.isActive).length,
+          keyEntries: mapKeyEntriesResponse(respEntries),
+          ...(isGrouped ? { apiGroups: groups } : {}),
         };
       }
 
-      const merged = [...existingEntries, ...toAdd];
-      const firstActive = merged.find((k) => k.isActive);
+      let respEntries: UpstreamKeyEntry[];
+      let allEntries: UpstreamKeyEntry[];
+      const updateSet: any = { updatedAt: now };
+
+      if (isGrouped) {
+        groups[targetGroupIndex]!.keyEntries = [...existingEntries, ...toAdd];
+        Object.assign(updateSet, buildGroupSyncFields(groups));
+        respEntries = groups[targetGroupIndex]!.keyEntries;
+        allEntries = groups.flatMap((g) => g.keyEntries);
+      } else {
+        const merged = [...existingEntries, ...toAdd];
+        const firstActive = merged.find((k) => k.isActive);
+        updateSet.apiKey = firstActive ? firstActive.key : merged[0]!.key;
+        updateSet.apiKeys = JSON.stringify(merged);
+        respEntries = merged;
+        allEntries = merged;
+      }
 
       db.update(upstreamKeys)
-        .set({
-          apiKey: firstActive ? firstActive.key : merged[0]!.key,
-          apiKeys: JSON.stringify(merged),
-          updatedAt: now,
-        })
+        .set(updateSet)
         .where(eq(upstreamKeys.id, id))
         .run();
 
@@ -1607,15 +1687,10 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         importedCount: toAdd.length,
         duplicatesSkipped,
         message: `Successfully imported ${toAdd.length} key${toAdd.length > 1 ? "s" : ""}${duplicatesSkipped > 0 ? ` (${duplicatesSkipped} duplicates skipped)` : ""}`,
-        totalKeysCount: merged.length,
-        activeKeysCount: merged.filter((k) => k.isActive).length,
-        keyEntries: merged.map((e) => ({
-          id: e.id,
-          name: e.name,
-          maskedKey: maskKey(e.key),
-          isActive: e.isActive,
-          createdAt: e.createdAt,
-        })),
+        totalKeysCount: allEntries.length,
+        activeKeysCount: allEntries.filter((k) => k.isActive).length,
+        keyEntries: mapKeyEntriesResponse(respEntries),
+        ...(isGrouped ? { apiGroups: groups } : {}),
       };
     },
     {
@@ -1635,6 +1710,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         namePrefix: t.Optional(t.String()),
         defaultActive: t.Optional(t.Boolean()),
         skipDuplicates: t.Optional(t.Boolean()),
+        groupId: t.Optional(t.String()),
       }),
     }
   )
@@ -1652,6 +1728,36 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "Upstream not found" };
       }
 
+      const now = Date.now();
+      const groups = parseApiGroups((upstream as any).apiGroups);
+
+      if (groups.length > 0) {
+        let found = false;
+        for (const g of groups) {
+          const idx = g.keyEntries.findIndex((e) => e.id === keyId);
+          if (idx !== -1) {
+            g.keyEntries.splice(idx, 1);
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          set.status = 404;
+          return { success: false, error: "Key not found in pool" };
+        }
+        const sync = buildGroupSyncFields(groups);
+        db.update(upstreamKeys).set({ ...sync, updatedAt: now }).where(eq(upstreamKeys.id, id)).run();
+        const allEntries = groups.flatMap((g) => g.keyEntries);
+        return {
+          success: true,
+          message: "Key deleted successfully",
+          totalKeysCount: allEntries.length,
+          activeKeysCount: allEntries.filter((e) => e.isActive).length,
+          keyEntries: mapKeyEntriesResponse(allEntries),
+          apiGroups: groups,
+        };
+      }
+
       const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
       const targetIndex = entries.findIndex((e) => e.id === keyId);
       if (targetIndex === -1) {
@@ -1666,7 +1772,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         .set({
           apiKey: firstActive ? firstActive.key : (remaining[0]?.key || ""),
           apiKeys: JSON.stringify(remaining),
-          updatedAt: Date.now(),
+          updatedAt: now,
         })
         .where(eq(upstreamKeys.id, id))
         .run();
@@ -1676,13 +1782,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         message: "Key deleted successfully",
         totalKeysCount: remaining.length,
         activeKeysCount: remaining.filter((e) => e.isActive).length,
-        keyEntries: remaining.map((e) => ({
-          id: e.id,
-          name: e.name,
-          maskedKey: maskKey(e.key),
-          isActive: e.isActive,
-          createdAt: e.createdAt,
-        })),
+        keyEntries: mapKeyEntriesResponse(remaining),
       };
     }
   )
@@ -1706,6 +1806,30 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "No key IDs specified for deletion" };
       }
 
+      const now = Date.now();
+      const groups = parseApiGroups((upstream as any).apiGroups);
+
+      if (groups.length > 0) {
+        let deletedCount = 0;
+        for (const g of groups) {
+          const before = g.keyEntries.length;
+          g.keyEntries = g.keyEntries.filter((e) => !keyIdsToDelete.has(e.id));
+          deletedCount += before - g.keyEntries.length;
+        }
+        const sync = buildGroupSyncFields(groups);
+        db.update(upstreamKeys).set({ ...sync, updatedAt: now }).where(eq(upstreamKeys.id, id)).run();
+        const allEntries = groups.flatMap((g) => g.keyEntries);
+        return {
+          success: true,
+          deletedCount,
+          message: `Successfully deleted ${deletedCount} key(s)`,
+          totalKeysCount: allEntries.length,
+          activeKeysCount: allEntries.filter((e) => e.isActive).length,
+          keyEntries: mapKeyEntriesResponse(allEntries),
+          apiGroups: groups,
+        };
+      }
+
       const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
       const remaining = entries.filter((e) => !keyIdsToDelete.has(e.id));
       const deletedCount = entries.length - remaining.length;
@@ -1715,7 +1839,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         .set({
           apiKey: firstActive ? firstActive.key : (remaining[0]?.key || ""),
           apiKeys: JSON.stringify(remaining),
-          updatedAt: Date.now(),
+          updatedAt: now,
         })
         .where(eq(upstreamKeys.id, id))
         .run();
@@ -1726,13 +1850,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         message: `Successfully deleted ${deletedCount} key(s)`,
         totalKeysCount: remaining.length,
         activeKeysCount: remaining.filter((e) => e.isActive).length,
-        keyEntries: remaining.map((e) => ({
-          id: e.id,
-          name: e.name,
-          maskedKey: maskKey(e.key),
-          isActive: e.isActive,
-          createdAt: e.createdAt,
-        })),
+        keyEntries: mapKeyEntriesResponse(remaining),
       };
     },
     {
@@ -1755,6 +1873,27 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "Upstream not found" };
       }
 
+      const now = Date.now();
+      const groups = parseApiGroups((upstream as any).apiGroups);
+
+      if (groups.length > 0) {
+        const targetGroups = body.groupId ? groups.filter((g) => g.id === body.groupId) : groups;
+        for (const g of targetGroups) {
+          if (body.enableAll) g.keyEntries = g.keyEntries.map((e) => ({ ...e, isActive: true }));
+          else if (body.disableAll) g.keyEntries = g.keyEntries.map((e) => ({ ...e, isActive: false }));
+        }
+        const sync = buildGroupSyncFields(groups);
+        db.update(upstreamKeys).set({ ...sync, updatedAt: now }).where(eq(upstreamKeys.id, id)).run();
+        const allEntries = groups.flatMap((g) => g.keyEntries);
+        return {
+          success: true,
+          totalKeysCount: allEntries.length,
+          activeKeysCount: allEntries.filter((e) => e.isActive).length,
+          keyEntries: mapKeyEntriesResponse(allEntries),
+          apiGroups: groups,
+        };
+      }
+
       let entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
       if (body.enableAll) {
         entries = entries.map((e) => ({ ...e, isActive: true }));
@@ -1768,7 +1907,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         .set({
           apiKey: firstActive ? firstActive.key : entries[0]!.key,
           apiKeys: JSON.stringify(entries),
-          updatedAt: Date.now(),
+          updatedAt: now,
         })
         .where(eq(upstreamKeys.id, id))
         .run();
@@ -1777,19 +1916,14 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         success: true,
         totalKeysCount: entries.length,
         activeKeysCount: entries.filter((e) => e.isActive).length,
-        keyEntries: entries.map((e) => ({
-          id: e.id,
-          name: e.name,
-          maskedKey: maskKey(e.key),
-          isActive: e.isActive,
-          createdAt: e.createdAt,
-        })),
+        keyEntries: mapKeyEntriesResponse(entries),
       };
     },
     {
       body: t.Object({
         enableAll: t.Optional(t.Boolean()),
         disableAll: t.Optional(t.Boolean()),
+        groupId: t.Optional(t.String()),
       }),
     }
   )
@@ -1805,6 +1939,35 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
       if (!upstream) {
         set.status = 404;
         return { success: false, error: "Upstream not found" };
+      }
+
+      const now = Date.now();
+      const groups = parseApiGroups((upstream as any).apiGroups);
+
+      if (groups.length > 0) {
+        let target: UpstreamKeyEntry | undefined;
+        for (const g of groups) {
+          target = g.keyEntries.find((e) => e.id === body.keyId);
+          if (target) break;
+        }
+        if (!target) {
+          set.status = 404;
+          return { success: false, error: "Key not found in pool" };
+        }
+        const newActive = body.isActive !== undefined ? body.isActive : !target.isActive;
+        target.isActive = newActive;
+        const sync = buildGroupSyncFields(groups);
+        db.update(upstreamKeys).set({ ...sync, updatedAt: now }).where(eq(upstreamKeys.id, id)).run();
+        const allEntries = groups.flatMap((g) => g.keyEntries);
+        return {
+          success: true,
+          keyId: body.keyId,
+          isActive: newActive,
+          keyEntries: mapKeyEntriesResponse(allEntries),
+          apiGroups: groups,
+          totalKeysCount: allEntries.length,
+          activeKeysCount: allEntries.filter((e) => e.isActive).length,
+        };
       }
 
       const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
@@ -1823,7 +1986,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         .set({
           apiKey: firstActive ? firstActive.key : entries[0]!.key,
           apiKeys: JSON.stringify(entries),
-          updatedAt: Date.now(),
+          updatedAt: now,
         })
         .where(eq(upstreamKeys.id, id))
         .run();
@@ -1832,13 +1995,7 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         success: true,
         keyId: body.keyId,
         isActive: newActive,
-        keyEntries: entries.map((e) => ({
-          id: e.id,
-          name: e.name,
-          maskedKey: maskKey(e.key),
-          isActive: e.isActive,
-          createdAt: e.createdAt,
-        })),
+        keyEntries: mapKeyEntriesResponse(entries),
         totalKeysCount: entries.length,
         activeKeysCount: entries.filter((e) => e.isActive).length,
       };
@@ -1864,22 +2021,38 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "Upstream not found" };
       }
 
-      const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
-      const target = entries.find((e) => e.id === keyId);
-      if (!target) {
+      const groups = parseApiGroups((upstream as any).apiGroups);
+      let targetKey: UpstreamKeyEntry | undefined;
+      let targetBaseUrl = upstream.baseUrl;
+
+      if (groups.length > 0) {
+        for (const g of groups) {
+          const found = g.keyEntries.find((e) => e.id === keyId);
+          if (found) {
+            targetKey = found;
+            targetBaseUrl = g.baseUrl || upstream.baseUrl;
+            break;
+          }
+        }
+      } else {
+        const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
+        targetKey = entries.find((e) => e.id === keyId);
+      }
+
+      if (!targetKey) {
         set.status = 404;
         return { success: false, error: "Key not found in pool" };
       }
 
       const res = await testSingleKey(
         upstream.provider as "openai" | "anthropic",
-        upstream.baseUrl,
-        target.key
+        targetBaseUrl,
+        targetKey.key
       );
 
       return {
         keyId,
-        keyName: target.name,
+        keyName: targetKey.name,
         ...res,
       };
     }
@@ -1898,22 +2071,44 @@ export const upstreamRoutes = new Elysia({ prefix: "/api/upstreams" })
         return { success: false, error: "Upstream not found" };
       }
 
-      const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
+      const groups = parseApiGroups((upstream as any).apiGroups);
       const results = [];
 
-      for (const entry of entries) {
-        const res = await testSingleKey(
-          upstream.provider as "openai" | "anthropic",
-          upstream.baseUrl,
-          entry.key
-        );
-        results.push({
-          id: entry.id,
-          name: entry.name,
-          maskedKey: maskKey(entry.key),
-          isActive: entry.isActive,
-          ...res,
-        });
+      if (groups.length > 0) {
+        for (const g of groups) {
+          for (const entry of g.keyEntries) {
+            const res = await testSingleKey(
+              upstream.provider as "openai" | "anthropic",
+              g.baseUrl || upstream.baseUrl,
+              entry.key
+            );
+            results.push({
+              id: entry.id,
+              name: entry.name,
+              maskedKey: maskKey(entry.key),
+              isActive: entry.isActive,
+              baseUrl: g.baseUrl,
+              groupId: g.id,
+              ...res,
+            });
+          }
+        }
+      } else {
+        const entries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
+        for (const entry of entries) {
+          const res = await testSingleKey(
+            upstream.provider as "openai" | "anthropic",
+            upstream.baseUrl,
+            entry.key
+          );
+          results.push({
+            id: entry.id,
+            name: entry.name,
+            maskedKey: maskKey(entry.key),
+            isActive: entry.isActive,
+            ...res,
+          });
+        }
       }
 
       return {

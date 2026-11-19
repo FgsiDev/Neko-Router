@@ -729,6 +729,7 @@ let upstreamResponse!: Response;
 let responseResolved = false;
 let lastAttemptError: any = null;
 let lastErrorResponse: Response | null = null;
+let selectedTarget: { baseUrl: string; groupId?: string; keyId?: string } | null = null;
 
 providerLoop: for (const candidate of upstreamCandidates) {
   upstream = candidate;
@@ -737,6 +738,7 @@ providerLoop: for (const candidate of upstreamCandidates) {
     candidate.baseUrl?.includes("chatgpt.com/backend-api/codex") ||
     candidate.name.toLowerCase().includes("codex");
   const target = getUpstreamTarget(candidate);
+  selectedTarget = { baseUrl: target.baseUrl, groupId: target.groupId, keyId: target.keyId };
   upstreamUrl = isCodex
     ? (candidate.baseUrl?.trim() || CODEX_CONFIG.BASE_URL)
     : `${target.baseUrl}/chat/completions`;
@@ -755,6 +757,9 @@ providerLoop: for (const candidate of upstreamCandidates) {
           }
           lastErrorResponse = null;
         }
+        const usedKey = keyCandidates[attempt]!;
+        const usedEntry = (target.keyEntries || []).find((e) => e.key === usedKey);
+        if (usedEntry?.id) selectedTarget.keyId = usedEntry.id;
         upstreamResponse = response;
         responseResolved = true;
         break providerLoop;
@@ -814,6 +819,9 @@ if (!responseResolved) {
       durationMs,
       isStreaming: isStream,
       errorMessage: errorMsg,
+      baseUrl: selectedTarget?.baseUrl ?? null,
+      upstreamGroupId: selectedTarget?.groupId ?? null,
+      selectedKeyId: selectedTarget?.keyId ?? null,
     });
 
     return new Response(
@@ -850,6 +858,9 @@ if (!responseResolved) {
       durationMs,
       isStreaming: isStream,
       errorMessage: errorText.slice(0, 500),
+      baseUrl: selectedTarget?.baseUrl ?? null,
+      upstreamGroupId: selectedTarget?.groupId ?? null,
+      selectedKeyId: selectedTarget?.keyId ?? null,
     });
 
     return new Response(errorText, {
@@ -916,6 +927,9 @@ if (!responseResolved) {
       statusCode: upstreamResponse.status,
       durationMs,
       isStreaming: false,
+      baseUrl: selectedTarget?.baseUrl ?? null,
+      upstreamGroupId: selectedTarget?.groupId ?? null,
+      selectedKeyId: selectedTarget?.keyId ?? null,
     });
 
     if (clientKey && totalTokens > 0) {
@@ -1062,6 +1076,9 @@ if (!responseResolved) {
         statusCode: upstreamResponse.status,
         durationMs,
         isStreaming: true,
+        baseUrl: selectedTarget?.baseUrl ?? null,
+        upstreamGroupId: selectedTarget?.groupId ?? null,
+        selectedKeyId: selectedTarget?.keyId ?? null,
       });
 
       const finalTokens = totalTokens || promptTokens + completionTokens;
@@ -1557,11 +1574,13 @@ let upstreamResponse!: Response;
 let responseResolved = false;
 let lastAttemptError: any = null;
 let lastErrorResponse: Response | null = null;
+let selectedTarget: { baseUrl: string; groupId?: string; keyId?: string } | null = null;
 
 providerLoop: for (const candidate of upstreamCandidates) {
   upstream = candidate;
   finishActive.setUpstream(candidate.id);
   const target = getUpstreamTarget(candidate);
+  selectedTarget = { baseUrl: target.baseUrl, groupId: target.groupId, keyId: target.keyId };
   upstreamUrl = `${target.baseUrl}/v1/messages`;
 
   const keyCandidates = buildFailoverKeyCandidates(target.apiKey, target.keyEntries);
@@ -1583,6 +1602,9 @@ providerLoop: for (const candidate of upstreamCandidates) {
           }
           lastErrorResponse = null;
         }
+        const usedKey = keyCandidates[attempt]!;
+        const usedEntry = (target.keyEntries || []).find((e) => e.key === usedKey);
+        if (usedEntry?.id) selectedTarget.keyId = usedEntry.id;
         upstreamResponse = response;
         responseResolved = true;
         break providerLoop;
@@ -1642,6 +1664,9 @@ if (!responseResolved) {
       durationMs,
       isStreaming: isStream,
       errorMessage: errorMsg,
+      baseUrl: selectedTarget?.baseUrl ?? null,
+      upstreamGroupId: selectedTarget?.groupId ?? null,
+      selectedKeyId: selectedTarget?.keyId ?? null,
     });
 
     return new Response(
@@ -1678,6 +1703,9 @@ if (!responseResolved) {
       durationMs,
       isStreaming: isStream,
       errorMessage: errorText.slice(0, 500),
+      baseUrl: selectedTarget?.baseUrl ?? null,
+      upstreamGroupId: selectedTarget?.groupId ?? null,
+      selectedKeyId: selectedTarget?.keyId ?? null,
     });
 
     return new Response(errorText, {
@@ -1715,6 +1743,9 @@ if (!responseResolved) {
       statusCode: upstreamResponse.status,
       durationMs,
       isStreaming: false,
+      baseUrl: selectedTarget?.baseUrl ?? null,
+      upstreamGroupId: selectedTarget?.groupId ?? null,
+      selectedKeyId: selectedTarget?.keyId ?? null,
     });
 
     if (clientKey && totalTokens > 0) {
@@ -1809,6 +1840,9 @@ if (!responseResolved) {
         statusCode: upstreamResponse.status,
         durationMs,
         isStreaming: true,
+        baseUrl: selectedTarget?.baseUrl ?? null,
+        upstreamGroupId: selectedTarget?.groupId ?? null,
+        selectedKeyId: selectedTarget?.keyId ?? null,
       });
 
       if (clientKey && (promptTokens + completionTokens) > 0) {

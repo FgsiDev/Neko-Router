@@ -909,6 +909,51 @@ className="w-full h-full object-contain"
                     log.completionTokens,
                     log.cachedTokens
                   );
+                  const logUpstream = log.upstreamKeyId ? upstreams.find((u) => u.id === log.upstreamKeyId) : null;
+                  let multiMarker: string | null = null;
+                  if (logUpstream) {
+                    const name = (logUpstream.name || "").toLowerCase();
+                    const base = (logUpstream.baseUrl || "").toLowerCase();
+                    const id = (logUpstream.id || "").toLowerCase();
+                    const isAcc =
+                      name.includes("copilot") || base.includes("githubcopilot.com") || id.includes("copilot") ||
+                      name.includes("antigravity") || base.includes("cloudcode-pa.googleapis.com") || id.includes("antigravity") ||
+                      name.includes("codex") || base.includes("chatgpt.com/backend-api/codex") || id.includes("codex");
+                    const unit = isAcc ? "Account" : "Key";
+
+                    if (logUpstream.apiGroups?.length) {
+                      if (log.upstreamGroupId) {
+                        const gIdx = logUpstream.apiGroups.findIndex((g) => g.id === log.upstreamGroupId);
+                        if (gIdx >= 0) {
+                          const group = logUpstream.apiGroups[gIdx];
+                          let kIdx = -1;
+                          if (log.selectedKeyId) {
+                            kIdx = (group.keyEntries || []).findIndex((k) => k.id === log.selectedKeyId);
+                          }
+                          multiMarker = kIdx >= 0 ? `API #${gIdx + 1} (${unit} #${kIdx + 1})` : `API #${gIdx + 1}`;
+                        }
+                      }
+                      if (!multiMarker) {
+                        multiMarker = "Multi API";
+                      }
+                    } else if ((logUpstream.baseUrls?.length || 0) > 1) {
+                      let apiIdx = -1;
+                      if (log.baseUrl) {
+                        const norm = (s: string) => s.replace(/\/+$/, "");
+                        apiIdx = (logUpstream.baseUrls || []).findIndex((b) => norm(b) === norm(log.baseUrl!));
+                      }
+                      let kIdx = -1;
+                      if (log.selectedKeyId) {
+                        kIdx = (logUpstream.keyEntries || []).findIndex((k) => k.id === log.selectedKeyId);
+                      }
+                      if (apiIdx >= 0 || kIdx >= 0) {
+                        const apiLabel = apiIdx >= 0 ? `API #${apiIdx + 1}` : "API #?";
+                        multiMarker = kIdx >= 0 ? `${apiLabel} (${unit} #${kIdx + 1})` : apiLabel;
+                      } else {
+                        multiMarker = "Multi API";
+                      }
+                    }
+                  }
 
                   return (
                     <div
@@ -916,14 +961,23 @@ className="w-full h-full object-contain"
                       className="grid grid-cols-12 items-center px-2 py-2 rounded text-xs hover:bg-zinc-800/40 transition-colors"
                     >
                       {/* Model with status dot */}
-                      <div className="col-span-5 flex items-center space-x-1.5 truncate">
+                      <div className="col-span-5 flex items-center space-x-1.5 min-w-0">
                         <span
                           className={`w-1.5 h-1.5 rounded-full shrink-0 ${isOk ? "bg-emerald-400" : "bg-rose-500"
                             }`}
                         />
-                        <span className="font-mono text-[11px] text-zinc-300 truncate" title={log.model}>
-                          {log.model}
-                        </span>
+                        <div className="min-w-0 flex-1">
+                          <span className="font-mono text-[11px] text-zinc-300 truncate block" title={log.model}>
+                            {log.model}
+                          </span>
+                          {multiMarker && (
+                            <div className="flex items-center gap-1 mt-0.5 min-w-0" title={multiMarker}>
+                              <span className="text-[9px] px-1 py-px rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono shrink-0">
+                                {multiMarker}
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       </div>
 
                       {/* Tokens or Cost */}
@@ -999,13 +1053,73 @@ className="w-full h-full object-contain"
           </h3>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {stats.modelStats.map((m, idx) => (
+            {stats.modelStats.map((m, idx) => {
+              let multiMarker: string | null = null;
+              if ((m as any).upstreamGroupId) {
+                for (const u of upstreams) {
+                  if (!u.apiGroups?.length) continue;
+                  const gIdx = u.apiGroups.findIndex((g) => g.id === (m as any).upstreamGroupId);
+                  if (gIdx >= 0) {
+                    const group = u.apiGroups[gIdx];
+                    const name = (u.name || "").toLowerCase();
+                    const url = (u.baseUrl || group.baseUrl || "").toLowerCase();
+                    const id = (u.id || "").toLowerCase();
+                    const isAcc =
+                      name.includes("copilot") || url.includes("githubcopilot.com") || id.includes("copilot") ||
+                      name.includes("antigravity") || url.includes("cloudcode-pa.googleapis.com") || id.includes("antigravity") ||
+                      name.includes("codex") || url.includes("chatgpt.com/backend-api/codex") || id.includes("codex");
+                    const unit = isAcc ? "Account" : "Key";
+                    let kIdx = -1;
+                    if ((m as any).selectedKeyId) {
+                      kIdx = (group.keyEntries || []).findIndex((k) => k.id === (m as any).selectedKeyId);
+                    }
+                    multiMarker = kIdx >= 0 ? `API #${gIdx + 1} (${unit} #${kIdx + 1})` : `API #${gIdx + 1}`;
+                    break;
+                  }
+                }
+                if (!multiMarker) {
+                  multiMarker = "Multi API";
+                }
+              } else if (m.baseUrl) {
+                // legacy baseUrls pool: try to resolve API index by baseUrl
+                for (const u of upstreams) {
+                  if (!u.baseUrls || u.baseUrls.length <= 1) continue;
+                  const norm = (s: string) => s.replace(/\/+$/, "");
+                  const bIdx = u.baseUrls.findIndex((b) => norm(b) === norm(m.baseUrl!));
+                  if (bIdx >= 0) {
+                    const name = (u.name || "").toLowerCase();
+                    const base = (u.baseUrl || "").toLowerCase();
+                    const id = (u.id || "").toLowerCase();
+                    const isAcc =
+                      name.includes("copilot") || base.includes("githubcopilot.com") || id.includes("copilot") ||
+                      name.includes("antigravity") || base.includes("cloudcode-pa.googleapis.com") || id.includes("antigravity") ||
+                      name.includes("codex") || base.includes("chatgpt.com/backend-api/codex") || id.includes("codex");
+                    const unit = isAcc ? "Account" : "Key";
+                    let kIdx = -1;
+                    if ((m as any).selectedKeyId) {
+                      kIdx = (u.keyEntries || []).findIndex((k) => k.id === (m as any).selectedKeyId);
+                    }
+                    multiMarker = kIdx >= 0 ? `API #${bIdx + 1} (${unit} #${kIdx + 1})` : `API #${bIdx + 1}`;
+                    break;
+                  }
+                }
+              }
+              return (
               <div key={idx} className="skeuo-card-subtle p-3.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                    {m.model}
-                  </span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded uppercase font-semibold bg-zinc-200 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-700">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <span className="font-mono text-xs font-semibold text-zinc-900 dark:text-zinc-100 truncate block">
+                      {m.model}
+                    </span>
+                    {multiMarker && (
+                      <div className="flex items-center gap-1 mt-1 min-w-0" title={multiMarker}>
+                        <span className="text-[9px] px-1 py-px rounded bg-amber-500/10 text-amber-500 dark:text-amber-400 border border-amber-500/20 font-mono shrink-0">
+                          {multiMarker}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded uppercase font-semibold bg-zinc-200 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-700 shrink-0">
                     {m.provider}
                   </span>
                 </div>
@@ -1028,7 +1142,8 @@ className="w-full h-full object-contain"
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

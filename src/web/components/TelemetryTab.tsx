@@ -9,11 +9,12 @@ import {
  Check,
  Loader2,
 } from "lucide-react";
-import { apiRequest, type TelemetryLogItem } from "../lib/api";
+import { apiRequest, type TelemetryLogItem, type UpstreamKeyItem } from "../lib/api";
 import { ToolLogsSection } from "./ToolLogsSection";
 
 export const TelemetryTab: React.FC = () => {
  const [logs, setLogs] = useState<TelemetryLogItem[]>([]);
+ const [upstreams, setUpstreams] = useState<UpstreamKeyItem[]>([]);
  const [loading, setLoading] = useState(true);
  const [selectedLog, setSelectedLog] = useState<TelemetryLogItem | null>(null);
  const [copiedId, setCopiedId] = useState(false);
@@ -36,13 +37,81 @@ export const TelemetryTab: React.FC = () => {
   const loadLogs = async () => {
     setLoading(true);
     try {
-      const data = await apiRequest<{ logs: TelemetryLogItem[] }>("/api/telemetry/logs?limit=50");
-      setLogs(data.logs);
+      const [logsData, upstreamsData] = await Promise.all([
+        apiRequest<{ logs: TelemetryLogItem[] }>("/api/telemetry/logs?limit=50").catch(() => ({ logs: [] })),
+        apiRequest<{ upstreams: UpstreamKeyItem[] }>("/api/upstreams").catch(() => ({ upstreams: [] })),
+      ]);
+      setLogs(logsData.logs || []);
+      if (upstreamsData?.upstreams) setUpstreams(upstreamsData.upstreams);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
+  };
+
+  const isAccountUpstream = (up?: UpstreamKeyItem | null) => {
+    if (!up) return false;
+    const name = (up.name || "").toLowerCase();
+    const base = (up.baseUrl || "").toLowerCase();
+    const id = (up.id || "").toLowerCase();
+    return (
+      name.includes("copilot") || base.includes("githubcopilot.com") || id.includes("copilot") ||
+      name.includes("antigravity") || base.includes("cloudcode-pa.googleapis.com") || id.includes("antigravity") ||
+      name.includes("codex") || base.includes("chatgpt.com/backend-api/codex") || id.includes("codex")
+    );
+  };
+
+  const getRouteInfo = (log: TelemetryLogItem) => {
+    const up = log.upstreamKeyId ? upstreams.find((u) => u.id === log.upstreamKeyId) : null;
+    const unit = isAccountUpstream(up) ? "Account" : "Key";
+    const groups = up?.apiGroups && up.apiGroups.length > 0 ? up.apiGroups : null;
+
+    if (groups) {
+      if (log.upstreamGroupId) {
+        const gIdx = groups.findIndex((g) => g.id === log.upstreamGroupId);
+        if (gIdx >= 0) {
+          const group = groups[gIdx];
+          if (group) {
+            let kIdx = -1;
+            if (log.selectedKeyId) {
+              kIdx = (group.keyEntries || []).findIndex((k) => k.id === log.selectedKeyId);
+            }
+            const label = kIdx >= 0 ? `API #${gIdx + 1} (${unit} #${kIdx + 1})` : `API #${gIdx + 1}`;
+            return { label, upstreamName: up?.name || null, approximate: false };
+          }
+        }
+      }
+      // Multi API upstream but group/key not recorded for this log (older request)
+      return { label: "Multi API", upstreamName: up?.name || null, approximate: true };
+    }
+
+    // Log recorded with multi-api group info but upstream/groups not resolvable now
+    if (log.upstreamGroupId) {
+      return { label: "Multi API", upstreamName: up?.name || null, approximate: true };
+    }
+
+    // Multi base-URL pool (legacy/baseUrls) upstream: derive marker from recorded baseUrl/key
+    const baseUrls = up?.baseUrls || [];
+    if (baseUrls.length > 1) {
+      let apiIdx = -1;
+      if (log.baseUrl) {
+        const norm = (s: string) => s.replace(/\/+$/, "");
+        apiIdx = baseUrls.findIndex((b) => norm(b) === norm(log.baseUrl!));
+      }
+      let kIdx = -1;
+      if (log.selectedKeyId) {
+        kIdx = (up?.keyEntries || []).findIndex((k) => k.id === log.selectedKeyId);
+      }
+      if (apiIdx >= 0 || kIdx >= 0) {
+        const apiLabel = apiIdx >= 0 ? `API #${apiIdx + 1}` : "API #?";
+        const label = kIdx >= 0 ? `${apiLabel} (${unit} #${kIdx + 1})` : apiLabel;
+        return { label, upstreamName: up?.name || null, approximate: apiIdx < 0 || kIdx < 0 };
+      }
+      return { label: "Multi API", upstreamName: up?.name || null, approximate: true };
+    }
+
+    return null;
   };
 
  useEffect(() => {
@@ -186,6 +255,19 @@ export const TelemetryTab: React.FC = () => {
                             {log.model}
                           </span>
                         </div>
+                        {(() => {
+                          const route = getRouteInfo(log);
+                          return route ? (
+                            <div className="mt-1">
+                              <span
+                                className="inline-flex text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-mono"
+                                title={route.approximate ? `${route.label} (API/key not recorded for this log)` : route.label}
+                              >
+                                {route.label}
+                              </span>
+                            </div>
+                          ) : null;
+                        })()}
                       </td>
                       <td className="px-4 py-3">
                         {log.isStreaming ? (
@@ -314,6 +396,32 @@ export const TelemetryTab: React.FC = () => {
                   </div>
                 </div>
               </div>
+
+              {(() => {
+                const route = getRouteInfo(selectedLog);
+                if (!route) return null;
+                return (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-3 rounded-md skeuo-card-subtle">
+                    <div className="min-w-0">
+                      <span className="text-zinc-400 block text-[10px] uppercase font-semibold tracking-wider">API Route</span>
+                      <span className="inline-flex mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-mono font-semibold">
+                        {route.label}
+                      </span>
+                      {route.approximate && (
+                        <span className="block mt-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+                          API/key not recorded for this log (older request)
+                        </span>
+                      )}
+                    </div>
+                    <div className="min-w-0 sm:text-right">
+                      <span className="text-zinc-400 block text-[10px] uppercase font-semibold tracking-wider">Upstream</span>
+                      <span className="text-zinc-900 dark:text-zinc-100 font-medium break-all block mt-0.5">
+                        {route.upstreamName || selectedLog.upstreamKeyId || "-"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 rounded-md skeuo-card-subtle text-center">
                 <div className="min-w-0">

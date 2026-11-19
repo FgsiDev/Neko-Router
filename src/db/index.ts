@@ -84,6 +84,9 @@ export function initTablesSync(): void {
       duration_ms INTEGER NOT NULL DEFAULT 0,
       is_streaming INTEGER NOT NULL DEFAULT 0,
       error_message TEXT,
+      base_url TEXT,
+      upstream_group_id TEXT,
+      selected_key_id TEXT,
       created_at INTEGER NOT NULL
     );
 
@@ -159,6 +162,15 @@ export function initTablesSync(): void {
   } catch (e) {}
   try {
     sqlite.run("ALTER TABLE upstream_keys ADD COLUMN api_groups TEXT;");
+  } catch (e) {}
+  try {
+    sqlite.run("ALTER TABLE telemetry_logs ADD COLUMN base_url TEXT;");
+  } catch (e) {}
+  try {
+    sqlite.run("ALTER TABLE telemetry_logs ADD COLUMN upstream_group_id TEXT;");
+  } catch (e) {}
+  try {
+    sqlite.run("ALTER TABLE telemetry_logs ADD COLUMN selected_key_id TEXT;");
   } catch (e) {}
   try {
     sqlite.run("ALTER TABLE upstream_keys ADD COLUMN models TEXT;");

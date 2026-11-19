@@ -178,14 +178,17 @@ export interface UpstreamTarget {
   baseUrl: string;
   apiKey: string;
   keyEntries: UpstreamKeyEntry[];
+  groupId?: string;
+  groupIndex?: number; // 1-based index within all apiGroups (for UI labels like "API #1")
+  keyId?: string;
+  keyIndex?: number; // 1-based index within the selected group's keyEntries
 }
 
 // Multi API mode: each group owns exactly one Base URL plus its own key pool.
 // Round robin rotates groups first, then keys inside the selected group (2x).
 export function getUpstreamTarget(upstream: UpstreamKey): UpstreamTarget {
-  const groups = parseApiGroups((upstream as any).apiGroups).filter((g) =>
-    g.keyEntries.some((k) => k.isActive)
-  );
+  const allGroups = parseApiGroups((upstream as any).apiGroups);
+  const groups = allGroups.filter((g) => g.keyEntries.some((k) => k.isActive));
 
   if (groups.length > 0) {
     const isRoundRobin = (upstream as any).roundRobin !== 0;
@@ -204,17 +207,31 @@ export function getUpstreamTarget(upstream: UpstreamKey): UpstreamTarget {
     if (isRoundRobin) {
       keyRotationIndex[keyRotationKey] = (keyIndex + 1) % activeKeys.length;
     }
+    const selectedKey = activeKeys[keyIndex]!;
+    const selectedKeyPos = group.keyEntries.findIndex((k) => k.id === selectedKey.id || k.key === selectedKey.key);
+    const displayIndex = allGroups.findIndex((g) => g.id === group.id);
     return {
       baseUrl: group.baseUrl || getBaseUrl(upstream),
-      apiKey: activeKeys[keyIndex]!.key,
+      apiKey: selectedKey.key,
       keyEntries: activeKeys,
+      groupId: group.id,
+      groupIndex: displayIndex >= 0 ? displayIndex + 1 : groupIndex + 1,
+      keyId: selectedKey.id,
+      keyIndex: selectedKeyPos >= 0 ? selectedKeyPos + 1 : keyIndex + 1,
     };
   }
 
+  const flatEntries = parseUpstreamKeyEntries(upstream.apiKeys, upstream.apiKey);
+  const activeFlat = flatEntries.filter((e) => e.isActive);
+  const selectedApiKey = getApiKeyForUpstream(upstream);
+  const selectedFlat = (activeFlat.length ? activeFlat : flatEntries).find((e) => e.key === selectedApiKey) || flatEntries[0];
+  const selectedFlatPos = selectedFlat ? flatEntries.findIndex((e) => e.id === selectedFlat.id || e.key === selectedFlat.key) : -1;
   return {
     baseUrl: getBaseUrlForUpstream(upstream),
-    apiKey: getApiKeyForUpstream(upstream),
-    keyEntries: getActiveUpstreamKeyEntries(upstream),
+    apiKey: selectedApiKey,
+    keyEntries: activeFlat.length ? activeFlat : getActiveUpstreamKeyEntries(upstream),
+    keyId: selectedFlat?.id,
+    keyIndex: selectedFlatPos >= 0 ? selectedFlatPos + 1 : undefined,
   };
 }
 

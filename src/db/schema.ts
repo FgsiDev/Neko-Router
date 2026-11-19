@@ -67,6 +67,9 @@ export const telemetryLogs = sqliteTable("telemetry_logs", {
   durationMs: integer("duration_ms").notNull().default(0),
   isStreaming: integer("is_streaming").notNull().default(0),
   errorMessage: text("error_message"),
+  baseUrl: text("base_url"),
+  upstreamGroupId: text("upstream_group_id"),
+  selectedKeyId: text("selected_key_id"),
   createdAt: integer("created_at").notNull(),
 });
 
